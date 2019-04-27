@@ -74,30 +74,6 @@ def get_default_hparams():
     return hparams
 
 
-# below is where we need to do MDN (Mixture Density Network) splitting of
-# distribution params
-def get_mixture_coef(output):
-    """Returns the tf slices containing mdn dist params."""
-    # This uses eqns 18 -> 23 of http://arxiv.org/abs/1308.0850.
-    z = output
-    z_pen_logits = z[:, 0:3]  # pen states
-    z_pi, z_mu1, z_mu2, z_sigma1, z_sigma2, z_corr = tf.split(z[:, 3:], 6, 1)
-
-    # process output z's into MDN parameters
-
-    # softmax all the pi's and pen states:
-    z_pi = tf.nn.softmax(z_pi)
-    z_pen = tf.nn.softmax(z_pen_logits)
-
-    # exponentiate the sigmas and also make corr between -1 and 1.
-    z_sigma1 = tf.exp(z_sigma1)
-    z_sigma2 = tf.exp(z_sigma2)
-    z_corr = tf.tanh(z_corr)
-
-    r = [z_pi, z_mu1, z_mu2, z_sigma1, z_sigma2, z_corr, z_pen, z_pen_logits]
-    return r
-
-
 class Model(object):
     """Define a SketchRNN model."""
 
@@ -241,7 +217,7 @@ class Model(object):
 
     def build_pix2seq_branch(self, pix_h, reuse=False):
         output, last_state, mean, presig = self.build_seq_decoder(pix_h, 'p2s', reuse=reuse)
-        self.rnn_output_p2s = output
+        self.gmm_output_p2s = output
         self.final_state_p2s = last_state
         self.mean_p2s = mean
         self.presig_p2s = presig
@@ -260,7 +236,7 @@ class Model(object):
 
     def build_seq2seq_branch(self, seq_h, reuse=False):
         output, last_state, mean, presig = self.build_seq_decoder(seq_h, 's2s', reuse=reuse)
-        self.rnn_output_s2s = output
+        self.gmm_output_s2s = output
         self.final_state_s2s = last_state
         self.mean_s2s = mean
         self.presig_s2s = presig
@@ -319,7 +295,32 @@ class Model(object):
         output = tf.reshape(output, [-1, self.hps.dec_rnn_size])
         output = tf.nn.xw_plus_b(output, output_w, output_b)
 
-        return output, last_state, mean, presig
+        gmm_output = self.get_mixture_coef(output)
+
+        return gmm_output, last_state, mean, presig
+
+    # below is where we need to do MDN (Mixture Density Network) splitting of
+    # distribution params
+    def get_mixture_coef(self, outputs):
+        """Returns the tf slices containing mdn dist params."""
+        # This uses eqns 18 -> 23 of http://arxiv.org/abs/1308.0850.
+        z = outputs
+        z_pen_logits = z[:, 0:3]  # pen states
+        z_pi, z_mu1, z_mu2, z_sigma1, z_sigma2, z_corr = tf.split(z[:, 3:], 6, 1)
+
+        # process output z's into MDN parameters
+
+        # softmax all the pi's and pen states:
+        z_pi = tf.nn.softmax(z_pi)
+        z_pen = tf.nn.softmax(z_pen_logits)
+
+        # exponentiate the sigmas and also make corr between -1 and 1.
+        z_sigma1 = tf.exp(z_sigma1)
+        z_sigma2 = tf.exp(z_sigma2)
+        z_corr = tf.tanh(z_corr)
+
+        r = [z_pi, z_mu1, z_mu2, z_sigma1, z_sigma2, z_corr, z_pen, z_pen_logits]
+        return r
 
     ###########################
 
@@ -411,7 +412,7 @@ class Model(object):
     def build_losses(self):
         # pix2seq_branch
         self.kl_cost_p2s = self.build_kl_loss(self.mean_p2s, self.presig_p2s)
-        self.r_cost_p2s = self.build_seq_reconst_loss(self.rnn_output_p2s)
+        self.r_cost_p2s = self.build_seq_reconst_loss(self.gmm_output_p2s)
 
         # seq2pix_branch
         self.kl_cost_s2p = self.build_kl_loss(self.mean_s2p, self.presig_s2p)
@@ -423,7 +424,7 @@ class Model(object):
 
         # seq2seq_branch
         self.kl_cost_s2s = self.build_kl_loss(self.mean_s2s, self.presig_s2s)
-        self.r_cost_s2s = self.build_seq_reconst_loss(self.rnn_output_s2s)
+        self.r_cost_s2s = self.build_seq_reconst_loss(self.gmm_output_s2s)
 
         # total
         self.kl_cost_sum = self.kl_cost_p2s + self.kl_cost_s2p + self.kl_cost_p2p + self.kl_cost_s2s
@@ -438,62 +439,60 @@ class Model(object):
         pixel_losses = tf.reduce_mean(tf.square(real_images - gen_images))
         return pixel_losses
 
-    def build_seq_reconst_loss(self, rnn_output):
-
-        # NB: the below are inner functions, not methods of Model
-        def tf_2d_normal(x1, x2, mu1, mu2, s1, s2, rho):
-            """Returns result of eq # 24 of http://arxiv.org/abs/1308.0850."""
-            norm1 = tf.subtract(x1, mu1)
-            norm2 = tf.subtract(x2, mu2)
-            s1s2 = tf.multiply(s1, s2)
-            # eq 25
-            z = (tf.square(tf.div(norm1, s1)) + tf.square(tf.div(norm2, s2)) -
-                 2 * tf.div(tf.multiply(rho, tf.multiply(norm1, norm2)), s1s2))
-            neg_rho = 1 - tf.square(rho)
-            result = tf.exp(tf.div(-z, 2 * neg_rho))
-            denom = 2 * np.pi * tf.multiply(s1s2, tf.sqrt(neg_rho))
-            result = tf.div(result, denom)
-            return result
-
-        def get_lossfunc(z_pi, z_mu1, z_mu2, z_sigma1, z_sigma2, z_corr,
-                         z_pen_logits, x1_data, x2_data, pen_data):
-            """Returns a loss fn based on eq #26 of http://arxiv.org/abs/1308.0850."""
-            # This represents the L_R only (i.e. does not include the KL loss term).
-
-            result0 = tf_2d_normal(x1_data, x2_data, z_mu1, z_mu2, z_sigma1, z_sigma2,
-                                   z_corr)
-            epsilon = 1e-6
-            # result1 is the loss wrt pen offset (L_s in equation 9 of
-            # https://arxiv.org/pdf/1704.03477.pdf)
-            result1 = tf.multiply(result0, z_pi)
-            result1 = tf.reduce_sum(result1, 1, keep_dims=True)
-            result1 = -tf.log(result1 + epsilon)  # avoid log(0)
-
-            fs = 1.0 - pen_data[:, 2]  # use training data for this
-            fs = tf.reshape(fs, [-1, 1])
-            # Zero out loss terms beyond N_s, the last actual stroke
-            result1 = tf.multiply(result1, fs)
-
-            # result2: loss wrt pen state, (L_p in equation 9)
-            result2 = tf.nn.softmax_cross_entropy_with_logits(
-                labels=pen_data, logits=z_pen_logits)
-            result2 = tf.reshape(result2, [-1, 1])
-            if not self.hps.is_training:  # eval mode, mask eos columns
-                result2 = tf.multiply(result2, fs)
-
-            result = result1 + result2
-            return result
-
-        out = get_mixture_coef(rnn_output)
-        [o_pi, o_mu1, o_mu2, o_sigma1, o_sigma2, o_corr, o_pen, o_pen_logits] = out
+    def build_seq_reconst_loss(self, gmm_output):
+        [o_pi, o_mu1, o_mu2, o_sigma1, o_sigma2, o_corr, o_pen, o_pen_logits] = gmm_output
 
         # reshape target data so that it is compatible with prediction shape
         target = tf.reshape(self.output_x, [-1, 5])
         [x1_data, x2_data, eos_data, eoc_data, cont_data] = tf.split(target, 5, 1)
         pen_data = tf.concat([eos_data, eoc_data, cont_data], 1)
 
-        lossfunc = get_lossfunc(o_pi, o_mu1, o_mu2, o_sigma1, o_sigma2, o_corr,
-                                o_pen_logits, x1_data, x2_data, pen_data)
+        lossfunc = self.get_lossfunc(o_pi, o_mu1, o_mu2, o_sigma1, o_sigma2, o_corr,
+                                     o_pen_logits, x1_data, x2_data, pen_data)
 
         r_cost = tf.reduce_mean(lossfunc)
         return r_cost
+
+    def get_lossfunc(self, z_pi, z_mu1, z_mu2, z_sigma1, z_sigma2, z_corr,
+                     z_pen_logits, x1_data, x2_data, pen_data):
+        """Returns a loss fn based on eq #26 of http://arxiv.org/abs/1308.0850."""
+        # This represents the L_R only (i.e. does not include the KL loss term).
+
+        result0 = self.tf_2d_normal(x1_data, x2_data, z_mu1, z_mu2, z_sigma1, z_sigma2,
+                                    z_corr)
+        epsilon = 1e-6
+        # result1 is the loss wrt pen offset (L_s in equation 9 of
+        # https://arxiv.org/pdf/1704.03477.pdf)
+        result1 = tf.multiply(result0, z_pi)
+        result1 = tf.reduce_sum(result1, 1, keep_dims=True)
+        result1 = -tf.log(result1 + epsilon)  # avoid log(0)
+
+        fs = 1.0 - pen_data[:, 2]  # use training data for this
+        fs = tf.reshape(fs, [-1, 1])
+        # Zero out loss terms beyond N_s, the last actual stroke
+        result1 = tf.multiply(result1, fs)
+
+        # result2: loss wrt pen state, (L_p in equation 9)
+        result2 = tf.nn.softmax_cross_entropy_with_logits(
+            labels=pen_data, logits=z_pen_logits)
+        result2 = tf.reshape(result2, [-1, 1])
+        if not self.hps.is_training:  # eval mode, mask eos columns
+            result2 = tf.multiply(result2, fs)
+
+        result = result1 + result2
+        return result
+
+    # NB: the below are inner functions, not methods of Model
+    def tf_2d_normal(self, x1, x2, mu1, mu2, s1, s2, rho):
+        """Returns result of eq # 24 of http://arxiv.org/abs/1308.0850."""
+        norm1 = tf.subtract(x1, mu1)
+        norm2 = tf.subtract(x2, mu2)
+        s1s2 = tf.multiply(s1, s2)
+        # eq 25
+        z = (tf.square(tf.div(norm1, s1)) + tf.square(tf.div(norm2, s2)) -
+             2 * tf.div(tf.multiply(rho, tf.multiply(norm1, norm2)), s1s2))
+        neg_rho = 1 - tf.square(rho)
+        result = tf.exp(tf.div(-z, 2 * neg_rho))
+        denom = 2 * np.pi * tf.multiply(s1s2, tf.sqrt(neg_rho))
+        result = tf.div(result, denom)
+        return result

@@ -1,4 +1,4 @@
-import model as sketch_rnn_model
+import model as sketch_p2s_model
 import utils
 from sketch_p2s_train import load_dataset
 from sketch_p2s_sampling import draw_strokes
@@ -73,8 +73,7 @@ def svg2png_v2(dwg_string, svgsize, pngsize, png_filename, padding=False):
 def main():
     data_base_dir = 'datasets/QuickDraw'
 
-    model_params = sketch_rnn_model.get_default_hparams()
-    model_params.data_type = 'QuickDraw'
+    model_params = sketch_p2s_model.get_default_hparams()
     for dataset_i in range(len(model_params.data_set)):
         data_set = model_params.data_set[dataset_i]
         sub_data_base_dir = os.path.join(data_base_dir, data_set)

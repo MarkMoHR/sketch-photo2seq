@@ -22,7 +22,7 @@ import json
 import os
 import time
 
-import model as sketch_rnn_model
+import model as sketch_p2s_model
 import utils
 import numpy as np
 import random
@@ -160,7 +160,7 @@ def load_dataset(sketch_data_dir, photo_data_dir, model_params, inference_mode=F
     model_params.max_seq_len = max_seq_len
     print('model_params.max_seq_len %i.' % model_params.max_seq_len)
 
-    eval_model_params = sketch_rnn_model.copy_hparams(model_params)
+    eval_model_params = sketch_p2s_model.copy_hparams(model_params)
     eval_model_params.use_input_dropout = 0
     eval_model_params.use_recurrent_dropout = 0
     eval_model_params.use_output_dropout = 0
@@ -170,7 +170,7 @@ def load_dataset(sketch_data_dir, photo_data_dir, model_params, inference_mode=F
         eval_model_params.batch_size = 1
         eval_model_params.is_training = 0
 
-    sample_model_params = sketch_rnn_model.copy_hparams(eval_model_params)
+    sample_model_params = sketch_p2s_model.copy_hparams(eval_model_params)
     sample_model_params.batch_size = 1  # only sample one at a time
     sample_model_params.max_seq_len = 1  # sample one point at a time
 
@@ -392,8 +392,8 @@ def trainer(model_params):
     unused_sample_model_params = datasets[5]
 
     reset_graph()
-    train_model = sketch_rnn_model.Model(train_model_params)
-    eval_model = sketch_rnn_model.Model(eval_model_params, reuse=True)
+    train_model = sketch_p2s_model.Model(train_model_params)
+    eval_model = sketch_p2s_model.Model(eval_model_params, reuse=True)
 
     tfconfig = tf.ConfigProto()
     tfconfig.gpu_options.allow_growth = True
@@ -415,7 +415,7 @@ def trainer(model_params):
 
 def main():
     """Load model params, save config file and start trainer."""
-    model_params = sketch_rnn_model.get_default_hparams()
+    model_params = sketch_p2s_model.get_default_hparams()
     if FLAGS.hparams:
         model_params.parse(FLAGS.hparams)
     trainer(model_params)

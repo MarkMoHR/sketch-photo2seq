@@ -16,7 +16,7 @@ import PIL
 from PIL import Image
 import matplotlib.pyplot as plt
 
-import model as sketch_rnn_model
+import model as sketch_p2s_model
 import utils
 from sketch_p2s_train import load_dataset, reset_graph, load_checkpoint, FLAGS
 
@@ -112,7 +112,7 @@ def load_env_compatible(sketch_data_dir, photo_data_dir, model_base_dir):
     """Loads environment for inference mode, used in jupyter notebook."""
     # modified https://github.com/tensorflow/magenta/blob/master/magenta/models/sketch_rnn/sketch_rnn_train.py
     # to work with depreciated tf.HParams functionality
-    model_params = sketch_rnn_model.get_default_hparams()
+    model_params = sketch_p2s_model.get_default_hparams()
     with tf.gfile.Open(os.path.join(model_base_dir, model_params.data_type, 'model_config.json'), 'r') as f:
         data = json.load(f)
     fix_list = ['is_training', 'use_input_dropout', 'use_output_dropout', 'use_recurrent_dropout']
@@ -124,7 +124,7 @@ def load_env_compatible(sketch_data_dir, photo_data_dir, model_base_dir):
                         model_params, inference_mode=True)
 
 
-def sample(sess, model, img_h, seq_len=250, temperature=1.0, greedy_mode=False):
+def sample(sess, model, pix_h, seq_len=250, temperature=1.0, greedy_mode=False):
     """Samples a sequence from a pre-trained model."""
 
     def adjust_temp(pi_pdf, temp):
@@ -160,7 +160,7 @@ def sample(sess, model, img_h, seq_len=250, temperature=1.0, greedy_mode=False):
     prev_x = np.zeros((1, 1, 5), dtype=np.float32)
     prev_x[0, 0, 2] = 1  # S0: [0, 0, 1, 0, 0]
 
-    prev_state = sess.run(model.initial_state_p2s, feed_dict={model.pix_h: img_h})
+    prev_state = sess.run(model.initial_state_p2s, feed_dict={model.pix_h: pix_h})
 
     strokes = np.zeros((seq_len, 5), dtype=np.float32)
     mixture_params = []
@@ -169,16 +169,14 @@ def sample(sess, model, img_h, seq_len=250, temperature=1.0, greedy_mode=False):
     temp = temperature
 
     for i in range(seq_len):
-        tf_gmm_coef = sketch_rnn_model.get_mixture_coef(model.rnn_output_p2s)
-
         feed = {
             model.input_x: prev_x,
             model.sequence_lengths: [1],
             model.initial_state_p2s: prev_state,
-            model.pix_h: img_h
+            model.pix_h: pix_h
         }
 
-        gmm_coef, next_state = sess.run([tf_gmm_coef, model.final_state_p2s], feed_dict=feed)
+        gmm_coef, next_state = sess.run([model.gmm_output_p2s, model.final_state_p2s], feed_dict=feed)
 
         [o_pi, o_mu1, o_mu2, o_sigma1, o_sigma2, o_corr, o_pen, o_pen_logits] = gmm_coef
         # top 6 param: [1, 20], o_pen: [1, 3], next_state: [1, 1024]
@@ -219,9 +217,9 @@ def sampling_conditional(sketch_data_dir, photo_data_dir, sampling_base_dir, mod
 
     # construct the sketch-rnn model here:
     reset_graph()
-    model = sketch_rnn_model.Model(hps_model)
-    eval_model = sketch_rnn_model.Model(eval_hps_model, reuse=True)
-    sampling_model = sketch_rnn_model.Model(sample_hps_model, reuse=True)
+    model = sketch_p2s_model.Model(hps_model)
+    eval_model = sketch_p2s_model.Model(eval_hps_model, reuse=True)
+    sampling_model = sketch_p2s_model.Model(sample_hps_model, reuse=True)
 
     tfconfig = tf.ConfigProto()
     tfconfig.gpu_options.allow_growth = True
@@ -259,8 +257,8 @@ def sampling_conditional(sketch_data_dir, photo_data_dir, sampling_base_dir, mod
         for i in range(10):
             for j in range(1):
                 print(i, j)
-                stroke_list.append(
-                    [sample(sess, sampling_model, common_pix_h, eval_model.hps.max_seq_len, temperature=0.1), [j, i]])
+                stroke_list.append([sample(sess, sampling_model, common_pix_h,
+                                           eval_model.hps.max_seq_len, temperature=0.1), [j, i]])
         stroke_grid = make_grid_svg(stroke_list)
         draw_strokes(stroke_grid, os.path.join(sub_sampling_dir, 'sketch_pred_multi.svg'))
 
